@@ -1,4 +1,4 @@
-# Major pagefaults top
+# Major page faults top
 
 ## Overview
 
@@ -7,7 +7,7 @@ It can be useful in your production environments where instances are highly depe
 
 Although, there is a command in perf-tools ```perf trace -F --no-syscalls``` created with same [purpose](https://lore.kernel.org/patchwork/patch/474548/), but presented project uses modern eBPF technology which works more efficiently.
 
-## Exapmple output
+## Example output
 
 ```
 $ sudo ./majortop.py                                            
