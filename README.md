@@ -5,7 +5,7 @@
 Trace major page faults with related filenames using [BPF](https://lwn.net/Articles/740157/). Sometimes you detect high rate of major faults per second (e.g., using ```sar -B 1``` command) but it's very clunky to determine which files are responsible for high IO. Standard performance tools have aggregation only per process (e.g., ```ps -eo pid,maj_flt,cmd | sort -nrk2```). But in some cases it is not enough: you may not be aware of all mapped files for instance and traversing through all fds in procfs maybe tedious and time-consuming.
 It can be useful in your production environments where instances are highly dependent on *mmap()* syscall (e.g. mongodb with specific storage engine) and memory-mapped files exceed your host or container limits.
 
-Although, there is a command in perf-tools ```perf trace -F --no-syscalls``` created with same [purpose](htps://lore.kernel.org/patchwork/patch/474548/), but presented project uses modern eBPF technology which works more efficiently.
+Although, there is a command in perf-tools ```perf trace -F --no-syscalls``` created with same [purpose](https://lore.kernel.org/patchwork/patch/474548/), but presented project uses modern eBPF technology which works more efficiently.
 
 ## Exapmple output
 
