@@ -98,11 +98,7 @@ int fault_handle_return(struct pt_regs *ctx) {
     data.address = val->address;
 
     struct file *vm_file = val->vma->vm_file;
-    if (vm_file == 0) {
-        data.inode = 0;
-        char anon_file[] = "[ anon ]";
-        __builtin_memcpy(&data.file, anon_file, sizeof(data.file));
-    } else {
+    if (vm_file != 0) {
         data.type = EVENT_PATH;
         struct dentry *dentry = vm_file->f_path.dentry;
 
