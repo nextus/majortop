@@ -15,9 +15,10 @@
 import sys, os
 import locale
 import argparse
-from bcc import BPF
+import functools
 import ctypes as ct
 
+from bcc import BPF
 
 EXAMPLES = """examples:
     ./majortop           # trace all major faults
@@ -144,8 +145,7 @@ class EventType(object):
 
 
 # process event
-faults = dict()
-def print_event(cpu, data, size):
+def print_event(filepaths, cpu, data, size):
     decode_locale = sys.stdin.encoding or locale.getpreferredencoding(True)
 
     event = ct.cast(data, ct.POINTER(Data)).contents
@@ -153,13 +153,13 @@ def print_event(cpu, data, size):
         key = (event.pid, event.address)
 
         strfile = event.file.decode(decode_locale)
-        if key not in faults:
-            faults[key] = strfile
+        if key not in filepaths:
+            filepaths[key] = strfile
         else:
-            faults[key] = os.path.join(strfile, faults[key])
+            filepaths[key] = os.path.join(strfile, filepaths[key])
     elif event.type == EventType.EVENT_RET:
         key = (event.pid, event.address)
-        if key not in faults:
+        if key not in filepaths:
             return
         
         # convert ns to ms
@@ -171,9 +171,9 @@ def print_event(cpu, data, size):
 
         # print
         print("%-12.4f %-12d %-20s %-12d %-16s %s" % (delta_ms, event.pid, strcomm,
-                                                      event.inode, hexaddress, faults[key]))
+                                                      event.inode, hexaddress, filepaths[key]))
 
-        faults.pop(key, None)
+        filepaths.pop(key, None)
 
 
 def main():
@@ -206,10 +206,13 @@ def main():
     b.attach_kprobe(event='handle_mm_fault', fn_name='fault_handle_start')
     b.attach_kretprobe(event='handle_mm_fault', fn_name='fault_handle_return')
 
+    filepaths = dict()
+
     # follow mode
     if args.follow:
         # loop with callback to print event
-        b["events"].open_perf_buffer(print_event)
+        b["events"].open_perf_buffer(
+            functools.partial(print_event, filepaths))
         try:
             while 1:
                 b.perf_buffer_poll()
