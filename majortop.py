@@ -111,7 +111,7 @@ DNAME_INLINE_LEN = 32         # linux/dcache.h
 
 
 class Data(ct.Structure):
-    _fields_ = [("pid", ct.c_ulong),
+    _fields_ = [("pid", ct.c_uint),
                 ("delta", ct.c_ulonglong),
                 ("inode", ct.c_ulonglong),
                 ("comm", ct.c_char * TASK_COMM_LEN),
