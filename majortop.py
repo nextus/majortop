@@ -6,9 +6,13 @@
 #
 # USAGE: majortop [-h] [-f]
 #
+# There is a limitation in BPF itself about maximum stack size, so you have to specify
+# maximum depth of file path resolution (MAXDEPTH). You should set moderate amount,
+# otherwise, the program won't start. Default is 5.
+#
 # It's initial release without aggregation feature.
 
-import sys
+import sys, os
 import locale
 import argparse
 from bcc import BPF
@@ -28,8 +32,14 @@ bpf_text = """
 #include <linux/mm.h>
 #include <linux/sched.h>
 
+enum event_type {
+    EVENT_RET,
+    EVENT_PATH,
+};
+
 struct data_t {
     u32 pid;
+    enum event_type type;
     u64 delta;
     u64 inode;
     char comm[TASK_COMM_LEN];
@@ -90,16 +100,24 @@ int fault_handle_return(struct pt_regs *ctx) {
         char anon_file[] = "[ anon ]";
         __builtin_memcpy(&data.file, anon_file, sizeof(data.file));
     } else {
-        // get filename
+        data.type = EVENT_PATH;
         struct dentry *dentry = vm_file->f_path.dentry;
-        struct qstr d_name = dentry->d_name;
-        bpf_probe_read_str(&data.file, sizeof(data.file), d_name.name);
-           
+
         // get inode
         data.inode = dentry->d_inode->i_ino;
+
+        // get filename
+        for (int i = 0; i < MAXDEPTH; i++) {
+            bpf_probe_read_str(&data.file, sizeof(data.file), dentry->d_name.name);
+            events.perf_submit(ctx, &data, sizeof(data));
+            if (dentry == dentry->d_parent)
+                break;
+            dentry = dentry->d_parent;
+        }
     }
 
     faults.delete(&pid);
+    data.type = EVENT_RET;
     events.perf_submit(ctx, &data, sizeof(data));
     return 0;
 }
@@ -112,6 +130,7 @@ DNAME_INLINE_LEN = 32         # linux/dcache.h
 
 class Data(ct.Structure):
     _fields_ = [("pid", ct.c_uint),
+                ("type", ct.c_int),
                 ("delta", ct.c_ulonglong),
                 ("inode", ct.c_ulonglong),
                 ("comm", ct.c_char * TASK_COMM_LEN),
@@ -119,22 +138,42 @@ class Data(ct.Structure):
                 ("address", ct.c_ulonglong)]
 
 
+class EventType(object):
+    EVENT_RET = 0
+    EVENT_PATH = 1
+
+
 # process event
+faults = dict()
 def print_event(cpu, data, size):
-    event = ct.cast(data, ct.POINTER(Data)).contents
-    # convert ns to ms
-    delta_ms = float(event.delta) / 10**6
-    # extract byte strings using default locale
     decode_locale = sys.stdin.encoding or locale.getpreferredencoding(True)
-    strcomm = event.comm.decode(decode_locale)
-    strfile = event.file.decode(decode_locale)
 
-    # represent memory address
-    hexaddress = hex(event.address)
+    event = ct.cast(data, ct.POINTER(Data)).contents
+    if event.type == EventType.EVENT_PATH:
+        key = (event.pid, event.address)
 
-    # print
-    print("%-12.4f %-12d %-20s %-12d %-16s %s" % (delta_ms, event.pid, strcomm,
-                                            event.inode, hexaddress, strfile))
+        strfile = event.file.decode(decode_locale)
+        if key not in faults:
+            faults[key] = strfile
+        else:
+            faults[key] = os.path.join(strfile, faults[key])
+    elif event.type == EventType.EVENT_RET:
+        key = (event.pid, event.address)
+        if key not in faults:
+            return
+        
+        # convert ns to ms
+        delta_ms = float(event.delta) / 10**6
+        # extract byte strings using default locale
+        strcomm = event.comm.decode(decode_locale)
+        # represent memory address
+        hexaddress = hex(event.address)
+
+        # print
+        print("%-12.4f %-12d %-20s %-12d %-16s %s" % (delta_ms, event.pid, strcomm,
+                                                      event.inode, hexaddress, faults[key]))
+
+        faults.pop(key, None)
 
 
 def main():
@@ -148,6 +187,9 @@ def main():
             'if (pid != {}) {{ return 0; }}'.format(args.pid))
     else:
         bpf_text = bpf_text.replace('FILTER', '')
+
+    # depth replace
+    bpf_text = bpf_text.replace('MAXDEPTH', args.max_depth)
 
     # print bpf text
     if DEBUG or args.ebpf:
@@ -183,6 +225,8 @@ def parse_args():
         epilog=EXAMPLES)
     parser.add_argument("-p", "--pid",
         help="trace specific PID only")
+    parser.add_argument("--max-depth", default=5,
+        help="descend at minimal level in filesystem hierarchy (defaults to 5)")
     parser.add_argument("-f", "--follow", action="store_true", default=True,
         help="trace new events sequently")
     parser.add_argument("--ebpf", action="store_true",
