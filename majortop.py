@@ -225,7 +225,7 @@ def parse_args():
         epilog=EXAMPLES)
     parser.add_argument("-p", "--pid",
         help="trace specific PID only")
-    parser.add_argument("--max-depth", default=5,
+    parser.add_argument("--max-depth", default="5",
         help="descend at minimal level in filesystem hierarchy (defaults to 5)")
     parser.add_argument("-f", "--follow", action="store_true", default=True,
         help="trace new events sequently")
