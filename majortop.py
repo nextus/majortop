@@ -6,9 +6,9 @@
 #
 # USAGE: majortop [-h] [-f]
 #
-# There is a limitation in BPF itself about maximum stack size, so you have to specify
-# maximum depth of file path resolution (MAXDEPTH). You should set moderate amount,
-# otherwise, the program won't start. Default is 5.
+# You have to specify maximum depth of file path resolution (MAXDEPTH).
+# You should set moderate amount, otherwise, the program won't start. Default is 5.
+# File path resolution works only within specific mount namespace.
 #
 # It's initial release without aggregation feature.
 
@@ -31,7 +31,7 @@ DEBUG = 0
 # define BPF program
 bpf_text = """
 #include <linux/mm.h>
-#include <linux/sched.h>
+#include <linux/mount.h>
 
 enum event_type {
     EVENT_RET,
@@ -46,6 +46,8 @@ struct data_t {
     char comm[TASK_COMM_LEN];
     char file[DNAME_INLINE_LEN];
     u64 address;
+    unsigned int major;
+    unsigned int minor;
 };
 
 struct val_t {
@@ -107,12 +109,16 @@ int fault_handle_return(struct pt_regs *ctx) {
         // get inode
         data.inode = dentry->d_inode->i_ino;
 
+        // get device id
+        struct vfsmount *mnt = vm_file->f_path.mnt;
+        dev_t dev = mnt->mnt_sb->s_dev;
+        data.major = MAJOR(dev);
+        data.minor = MINOR(dev);
+        
         // get filename
-        for (int i = 0; i < MAXDEPTH; i++) {
+        for (int i = 0; ((i < MAXDEPTH) && (dentry != dentry->d_parent)); i++) {
             bpf_probe_read_str(&data.file, sizeof(data.file), dentry->d_name.name);
             events.perf_submit(ctx, &data, sizeof(data));
-            if (dentry == dentry->d_parent)
-                break;
             dentry = dentry->d_parent;
         }
     }
@@ -136,7 +142,9 @@ class Data(ct.Structure):
                 ("inode", ct.c_ulonglong),
                 ("comm", ct.c_char * TASK_COMM_LEN),
                 ("file", ct.c_char * DNAME_INLINE_LEN),
-                ("address", ct.c_ulonglong)]
+                ("address", ct.c_ulonglong),
+                ("major", ct.c_uint),
+                ("minor", ct.c_uint)]
 
 
 class EventType(object):
@@ -168,10 +176,13 @@ def print_event(filepaths, cpu, data, size):
         strcomm = event.comm.decode(decode_locale)
         # represent memory address
         hexaddress = hex(event.address)
+        # device id
+        strdevice = "{}:{}".format(event.major, event.minor)
 
         # print
-        print("%-12.4f %-12d %-20s %-12d %-16s %s" % (delta_ms, event.pid, strcomm,
-                                                      event.inode, hexaddress, filepaths[key]))
+        print("%-12.4f %-12d %-20s %-12d %-16s %-9s %s" % (delta_ms, event.pid, strcomm,
+                                                      event.inode, hexaddress,
+                                                      strdevice, filepaths[key]))
 
         filepaths.pop(key, None)
 
@@ -198,8 +209,8 @@ def main():
             return 0
 
     # header
-    print("%-12s %-12s %-20s %-12s %-16s %s" % ("TIME(ms)", "PID", "COMM",
-                                                "INODE", "ADDRESS", "FILENAME"))
+    print("%-12s %-12s %-20s %-12s %-16s %-9s %s" % ("TIME(ms)", "PID", "COMM",
+                                                "INODE", "ADDRESS", "DEVICE", "FILENAME"))
 
     # initialize BPF
     b = BPF(text=bpf_text)

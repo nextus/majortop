@@ -11,13 +11,14 @@ Although, there is a command in perf-tools ```perf trace -F --no-syscalls``` cre
 
 ```
 $ sudo ./majortop.py                                            
-TIME(ms)     PID          COMM                 INODE        ADDRESS          FILENAME     
-0.4917       13407        fio                  21759123     0x7fbe57dc2000   fio-rand-read
-0.1570       13407        fio                  21759123     0x7fbe8360e000   fio-rand-read
-0.0920       13466        vmtouch              21642903     0x7f5b343ad000   fio-rand-RW
-0.0906       13466        vmtouch              21642903     0x7f5b345e3000   fio-rand-RW
-0.0932       13466        vmtouch              21642903     0x7f5b3461f000   fio-rand-RW
-0.0917       13466        vmtouch              21642903     0x7f5b34653000   fio-rand-RW
+TIME(ms)     PID          COMM                 INODE        ADDRESS          DEVICE    FILENAME
+0.1071       20637        fio                  21762985     0x7f2dd08da000   254:2     nextus/dev/fio.jobs/file3.0.0
+0.1097       20635        fio                  21762968     0x7f2dbe0f4000   254:2     nextus/dev/fio.jobs/file1.0.0
+0.1272       20636        fio                  21762983     0x7f2dc1851000   254:2     nextus/dev/fio.jobs/file2.0.0
+0.1015       20637        fio                  21762985     0x7f2dbf9c1000   254:2     nextus/dev/fio.jobs/file3.0.0
+0.1022       20636        fio                  21762983     0x7f2dc4631000   254:2     nextus/dev/fio.jobs/file2.0.0
+0.1044       20635        fio                  21762968     0x7f2de5b37000   254:2     nextus/dev/fio.jobs/file1.0.0
+0.1119       20637        fio                  21762985     0x7f2dab1a3000   254:2     nextus/dev/fio.jobs/file3.0.0
 ```
 
 You can generate major page faults using [fio](https://github.com/axboe/fio):
@@ -31,7 +32,13 @@ fio --name job1 --ioengine=mmap --rw=randread --filename=./fio-rand-read --size=
 There is a [bcc](https://raw.githubusercontent.com/iovisor/bcc/) tool. Follow upstream [installation guide](https://github.com/iovisor/bcc/blob/master/INSTALL.md) to run BPF tools. The minimal supported linux kernel version is 4.1.
 
 
+## File path resolution
+
+There is a limitation in BPF itself about maximum stack size, so you have to specify maximum depth of file path resolution (MAXDEPTH) or use default value (which is 5 iterations). You should set moderate amount, otherwise, the program won't start due to overflowing.
+File path resolution works only within specific mount namespace. You can use major and minor device ids to determine specific partition related to specific major fault.
+
+
+
 ## TODO
 
 1. Add aggregation feature (top-style)
-2. Add paths to filenames
