@@ -138,8 +138,7 @@ class Data(ct.Structure):
                 ("file", ct.c_char * DNAME_INLINE_LEN),
                 ("address", ct.c_ulonglong),
                 ("major", ct.c_uint),
-                ("minor", ct.c_uint),
-                ("cg", ct.c_char * 32)]
+                ("minor", ct.c_uint)]
 
 
 class EventType(object):
