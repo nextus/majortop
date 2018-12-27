@@ -48,7 +48,6 @@ struct data_t {
     u64 address;
     unsigned int major;
     unsigned int minor;
-    int retcode;
 };
 
 struct val_t {
@@ -80,38 +79,42 @@ int fault_handle_return(struct pt_regs *ctx) {
     if (val == 0)
         return 0;
  
+    vm_fault_t retcode = PT_REGS_RC(ctx);
+    if ( !(retcode & VM_FAULT_MAJOR)) {
+        faults.delete(&pid);
+        return 0;    
+    }
+
     struct data_t data = {};
-    data.retcode = PT_REGS_RC(ctx);
     data.pid = pid;
     data.delta = bpf_ktime_get_ns() - val->ts;
     if (bpf_get_current_comm(&data.comm, sizeof(data.comm)) != 0) {
         char unknown_comm[] = "...";
         __builtin_memcpy(&data.comm, unknown_comm, sizeof(data.comm));
     }
-
+    
     struct vm_fault *vmf = val->vmf;
     data.address = vmf->address;
 
     struct file *vm_file = vmf->vma->vm_file;
-    if (vm_file != 0) {
-        data.type = EVENT_PATH;
-        struct dentry *dentry = vm_file->f_path.dentry;
+ 
+    // get device id
+    struct vfsmount *mnt = vm_file->f_path.mnt;
+    dev_t dev = mnt->mnt_sb->s_dev;
+    data.major = MAJOR(dev);
+    data.minor = MINOR(dev);
+   
+    struct dentry *dentry = vm_file->f_path.dentry;
 
-        // get inode
-        data.inode = dentry->d_inode->i_ino;
-
-        // get device id
-        struct vfsmount *mnt = vm_file->f_path.mnt;
-        dev_t dev = mnt->mnt_sb->s_dev;
-        data.major = MAJOR(dev);
-        data.minor = MINOR(dev);
-        
-        // get filename
-        for (int i = 0; ((i < MAXDEPTH) && (dentry != dentry->d_parent)); i++) {
-            bpf_probe_read_str(&data.file, sizeof(data.file), dentry->d_name.name);
-            events.perf_submit(ctx, &data, sizeof(data));
-            dentry = dentry->d_parent;
-        }
+    // get inode
+    data.inode = dentry->d_inode->i_ino;
+    
+    // get filename
+    data.type = EVENT_PATH;
+    for (int i = 0; ((i < MAXDEPTH) && (dentry != dentry->d_parent)); i++) {
+        bpf_probe_read_str(&data.file, sizeof(data.file), dentry->d_name.name);
+        events.perf_submit(ctx, &data, sizeof(data));
+        dentry = dentry->d_parent;
     }
 
     faults.delete(&pid);
@@ -136,7 +139,7 @@ class Data(ct.Structure):
                 ("address", ct.c_ulonglong),
                 ("major", ct.c_uint),
                 ("minor", ct.c_uint),
-                ("retcode", ct.c_int)]
+                ("cg", ct.c_char * 32)]
 
 
 class EventType(object):
@@ -172,9 +175,9 @@ def print_event(filepaths, cpu, data, size):
         strdevice = "{}:{}".format(event.major, event.minor)
 
         # print
-        print("%-12.4f %-12d %-20s %-12d %-16s %-9s %s %d" % (delta_ms, event.pid, strcomm,
+        print("%-12.4f %-12d %-20s %-12d %-16s %-9s %s" % (delta_ms, event.pid, strcomm,
                                                       event.inode, hexaddress,
-                                                      strdevice, filepaths[key], event.retcode))
+                                                      strdevice, filepaths[key]))
 
         filepaths.pop(key, None)
 
