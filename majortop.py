@@ -48,25 +48,24 @@ struct data_t {
     u64 address;
     unsigned int major;
     unsigned int minor;
+    int retcode;
 };
 
 struct val_t {
-    struct vm_area_struct *vma;
+    struct vm_fault *vmf;
     u64 ts;
-    u64 address;
 };
 
 BPF_PERF_OUTPUT(events);
 BPF_HASH(faults, u32, struct val_t);
 
-int fault_handle_start(struct pt_regs *ctx, struct vm_area_struct *vma, u64 address) {
+int fault_handle_start(struct pt_regs *ctx, struct vm_fault *vmf) {
     u32 pid = bpf_get_current_pid_tgid();
     FILTER
 
     struct val_t val = {};
-    val.vma = vma;
+    val.vmf = vmf;
     val.ts = bpf_ktime_get_ns();
-    val.address = address;
     
     faults.update(&pid, &val);
 
@@ -77,27 +76,23 @@ int fault_handle_return(struct pt_regs *ctx) {
     u32 pid = bpf_get_current_pid_tgid();
     FILTER
 
-    vm_fault_t fault = PT_REGS_RC(ctx);
-
     struct val_t *val = faults.lookup(&pid);
     if (val == 0)
         return 0;
  
-    if ( !(fault & VM_FAULT_MAJOR)) {
-        faults.delete(&pid);
-        return 0;
-    }
-
     struct data_t data = {};
+    data.retcode = PT_REGS_RC(ctx);
     data.pid = pid;
     data.delta = bpf_ktime_get_ns() - val->ts;
     if (bpf_get_current_comm(&data.comm, sizeof(data.comm)) != 0) {
         char unknown_comm[] = "...";
         __builtin_memcpy(&data.comm, unknown_comm, sizeof(data.comm));
     }
-    data.address = val->address;
 
-    struct file *vm_file = val->vma->vm_file;
+    struct vm_fault *vmf = val->vmf;
+    data.address = vmf->address;
+
+    struct file *vm_file = vmf->vma->vm_file;
     if (vm_file != 0) {
         data.type = EVENT_PATH;
         struct dentry *dentry = vm_file->f_path.dentry;
@@ -140,7 +135,8 @@ class Data(ct.Structure):
                 ("file", ct.c_char * DNAME_INLINE_LEN),
                 ("address", ct.c_ulonglong),
                 ("major", ct.c_uint),
-                ("minor", ct.c_uint)]
+                ("minor", ct.c_uint),
+                ("retcode", ct.c_int)]
 
 
 class EventType(object):
@@ -176,9 +172,9 @@ def print_event(filepaths, cpu, data, size):
         strdevice = "{}:{}".format(event.major, event.minor)
 
         # print
-        print("%-12.4f %-12d %-20s %-12d %-16s %-9s %s" % (delta_ms, event.pid, strcomm,
+        print("%-12.4f %-12d %-20s %-12d %-16s %-9s %s %d" % (delta_ms, event.pid, strcomm,
                                                       event.inode, hexaddress,
-                                                      strdevice, filepaths[key]))
+                                                      strdevice, filepaths[key], event.retcode))
 
         filepaths.pop(key, None)
 
@@ -210,8 +206,8 @@ def main():
 
     # initialize BPF
     b = BPF(text=bpf_text)
-    b.attach_kprobe(event='handle_mm_fault', fn_name='fault_handle_start')
-    b.attach_kretprobe(event='handle_mm_fault', fn_name='fault_handle_return')
+    b.attach_kprobe(event='filemap_fault', fn_name='fault_handle_start')
+    b.attach_kretprobe(event='filemap_fault', fn_name='fault_handle_return')
 
     filepaths = dict()
 
