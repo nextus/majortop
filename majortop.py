@@ -17,6 +17,7 @@ import locale
 import argparse
 import functools
 import ctypes as ct
+import struct
 
 from bcc import BPF
 
@@ -146,8 +147,64 @@ class EventType(object):
     EVENT_PATH = 1
 
 
+class Pagemap(object):
+    PFN_MASK = 0x7FFFFFFFFFFFFF
+    PAGEMAP = "/proc/{pid}/pagemap"
+    KPAGECGROUP = "/proc/kpagecgroup"
+    KPAGECOUNT = "/proc/kpagecount"
+    CGROUP = "/sys/fs/cgroup/memory"
+
+    @staticmethod
+    def _read_pagemap(pagemap, offset, entry_size):
+        try:
+            with open(pagemap, 'rb') as f:
+                f.seek(offset, 0)
+                entry = struct.unpack('Q', f.read(entry_size))[0]
+        except:
+            return
+        return entry
+    
+    def _get_pfn(self):
+        pagemap = self.PAGEMAP.format(pid=self.pid)
+        if not os.path.isfile(pagemap):
+            return
+        offset  = (self.addr / self.page_size) * self.entry_size
+        entry = self._read_pagemap(pagemap, int(offset), self.entry_size)
+        if not entry:
+            return
+        return entry & self.PFN_MASK
+
+    def _find_cgroup(self, inode):
+        for root, subdirs, files in os.walk(self.CGROUP):
+            if os.stat(root).st_ino == inode:
+                return root
+
+    def get_cgroup(self):
+        entry = self._get_pfn()
+        if not entry:
+            return
+        offset = entry * self.entry_size
+        cgroup_ino = self._read_pagemap(self.KPAGECGROUP, offset, self.entry_size)
+        if not cgroup_ino:
+            return
+        cgroup_name = self._find_cgroup(cgroup_ino)
+        if not cgroup_name:
+            return cgroup_ino
+        return cgroup_name
+
+    def __init__(self, pid, addr):
+        self.pid = pid
+        if isinstance(addr, str):
+            base = 16 if addr.startswith("0x") else 10
+            self.addr = int(addr, base=base)
+        else:
+            self.addr = addr
+        self.page_size = os.sysconf("SC_PAGE_SIZE")
+        self.entry_size = 8
+
+
 # process event
-def print_event(filepaths, cpu, data, size):
+def print_event(filepaths, cgroup, header_fmt, cpu, data, size):
     decode_locale = sys.stdin.encoding or locale.getpreferredencoding(True)
 
     event = ct.cast(data, ct.POINTER(Data)).contents
@@ -166,17 +223,33 @@ def print_event(filepaths, cpu, data, size):
         
         # convert ns to ms
         delta_ms = float(event.delta) / 10**6
+        
         # extract byte strings using default locale
         strcomm = event.comm.decode(decode_locale)
+        
         # represent memory address
         hexaddress = hex(event.address)
+        cgroup_name = ''
+        if cgroup:
+            cgroup_name = Pagemap(event.pid, hexaddress).get_cgroup()
+            if not cgroup_name:
+                cgroup_name = 'unknown'
+            else:
+                cgroup_name = cgroup_name[len(Pagemap.CGROUP) + 1:]
+        
         # device id
         strdevice = "{}:{}".format(event.major, event.minor)
 
         # print
-        print("%-12.4f %-12d %-20s %-12d %-16s %-9s %s" % (delta_ms, event.pid, strcomm,
-                                                      event.inode, hexaddress,
-                                                      strdevice, filepaths[key]))
+        print(header_fmt.format(
+            time="{:.4}".format(delta_ms),
+            pid=event.pid,
+            comm=strcomm,
+            dev=strdevice,
+            inum=event.inode,
+            file=filepaths[key],
+            cgroup="{:<12}".format(cgroup_name) if cgroup else ''
+        ))
 
         filepaths.pop(key, None)
 
@@ -203,8 +276,14 @@ def main():
             return 0
 
     # header
-    print("%-12s %-12s %-20s %-12s %-16s %-9s %s" % ("TIME(ms)", "PID", "COMM",
-                                                "INODE", "ADDRESS", "DEVICE", "FILENAME"))
+    header_fmt = "{time:<12} {pid:<12} {comm:<20} {cgroup} {dev:<12} {inum:<12} {file}"
+    print(header_fmt.format(time="TIME(ms)",
+                            pid="PID",
+                            comm="COMM",
+                            dev="DEVICE",
+                            inum="INODE",
+                            file="FILENAME",
+                            cgroup="{:<12}".format("CGROUP") if args.cgroup else ""))
 
     # initialize BPF
     b = BPF(text=bpf_text)
@@ -217,7 +296,7 @@ def main():
     if args.follow:
         # loop with callback to print event
         b["events"].open_perf_buffer(
-            functools.partial(print_event, filepaths))
+            functools.partial(print_event, filepaths, args.cgroup, header_fmt))
         try:
             while 1:
                 b.perf_buffer_poll()
@@ -237,6 +316,8 @@ def parse_args():
         help="descend at minimal level in filesystem hierarchy (defaults to 5)")
     parser.add_argument("-f", "--follow", action="store_true", default=True,
         help="trace new events sequently")
+    parser.add_argument("-c", "--cgroup", action="store_true", default=False,
+        help="show cgroup name which charged faulted memory page")
     parser.add_argument("--ebpf", action="store_true",
         help=argparse.SUPPRESS)
     return parser.parse_args()
