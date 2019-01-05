@@ -163,24 +163,36 @@ class Pagemap(object):
         except:
             return
         return entry
-    
-    def _get_pfn(self):
-        pagemap = self.PAGEMAP.format(pid=self.pid)
+
+    @staticmethod
+    def _parse_addr(addr):
+        if isinstance(addr, str):
+            base = 16 if addr.startswith("0x") else 10
+            return int(addr, base=base)
+        return addr
+
+    def _get_pfn(self, pid, addr):
+        addr = self._parse_addr(addr)
+        pagemap = self.PAGEMAP.format(pid=pid)
         if not os.path.isfile(pagemap):
             return
-        offset  = (self.addr / self.page_size) * self.entry_size
+        offset  = (addr / self.page_size) * self.entry_size
         entry = self._read_pagemap(pagemap, int(offset), self.entry_size)
         if not entry:
             return
         return entry & self.PFN_MASK
 
     def _find_cgroup(self, inode):
+        if inode in self.cache_ino:
+            return self.cache_ino[inode]
         for root, subdirs, files in os.walk(self.CGROUP):
             if os.stat(root).st_ino == inode:
+                self.cache_ino[inode] = root
                 return root
+        return
 
-    def get_cgroup(self):
-        entry = self._get_pfn()
+    def get_cgroup(self, pid, addr):
+        entry = self._get_pfn(pid, addr)
         if not entry:
             return
         offset = entry * self.entry_size
@@ -192,13 +204,8 @@ class Pagemap(object):
             return cgroup_ino
         return cgroup_name
 
-    def __init__(self, pid, addr):
-        self.pid = pid
-        if isinstance(addr, str):
-            base = 16 if addr.startswith("0x") else 10
-            self.addr = int(addr, base=base)
-        else:
-            self.addr = addr
+    def __init__(self):
+        self.cache_ino = dict()
         self.page_size = os.sysconf("SC_PAGE_SIZE")
         self.entry_size = 8
 
@@ -231,10 +238,10 @@ def print_event(filepaths, cgroup, header_fmt, cpu, data, size):
         hexaddress = hex(event.address)
         cgroup_name = ''
         if cgroup:
-            cgroup_name = Pagemap(event.pid, hexaddress).get_cgroup()
+            cgroup_name = cgroup.get_cgroup(event.pid, hexaddress)
             if not cgroup_name:
                 cgroup_name = 'unknown'
-            else:
+            elif os.path.isabs(cgroup_name):
                 cgroup_name = cgroup_name[len(Pagemap.CGROUP) + 1:]
         
         # device id
@@ -292,11 +299,14 @@ def main():
 
     filepaths = dict()
 
+    # cgroup support
+    cgroup = Pagemap() if args.cgroup else None
+
     # follow mode
     if args.follow:
         # loop with callback to print event
         b["events"].open_perf_buffer(
-            functools.partial(print_event, filepaths, args.cgroup, header_fmt))
+            functools.partial(print_event, filepaths, cgroup, header_fmt))
         try:
             while 1:
                 b.perf_buffer_poll()
