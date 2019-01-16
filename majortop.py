@@ -215,15 +215,6 @@ class Pagemap(object):
         self.entry_size = 8
 
 
-class SuppressOutput(list):
-    def __enter__(self):
-        self._stderr = sys.stderr
-        with open(os.devnull, "w") as devnull:
-            sys.stderr = devnull
-        return self
-    def __exit__(self, *args):
-        sys.stderr = self._stderr
-
 
 def process_event(filepaths, event_data, cpu, data, size):
     decode_locale = sys.stdin.encoding or locale.getpreferredencoding(True)
