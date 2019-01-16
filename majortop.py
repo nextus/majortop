@@ -18,7 +18,10 @@ import argparse
 import functools
 import ctypes as ct
 import struct
+import time
 
+from subprocess import call
+from collections import namedtuple, Counter
 from bcc import BPF
 
 EXAMPLES = """examples:
@@ -28,6 +31,8 @@ EXAMPLES = """examples:
 """
 DEBUG = 0
 
+
+loadavg = "/proc/loadavg"
 
 # define BPF program
 bpf_text = """
@@ -210,8 +215,17 @@ class Pagemap(object):
         self.entry_size = 8
 
 
-# process event
-def print_event(filepaths, cgroup, header_fmt, cpu, data, size):
+class SuppressOutput(list):
+    def __enter__(self):
+        self._stderr = sys.stderr
+        with open(os.devnull, "w") as devnull:
+            sys.stderr = devnull
+        return self
+    def __exit__(self, *args):
+        sys.stderr = self._stderr
+
+
+def process_event(filepaths, event_data, cpu, data, size):
     decode_locale = sys.stdin.encoding or locale.getpreferredencoding(True)
 
     event = ct.cast(data, ct.POINTER(Data)).contents
@@ -228,40 +242,161 @@ def print_event(filepaths, cgroup, header_fmt, cpu, data, size):
         if key not in filepaths:
             return
         
+        # pid
+        event_data.pid = event.pid
+
         # convert ns to ms
-        delta_ms = float(event.delta) / 10**6
+        event_data.ts = float(event.delta) / 10**6
         
         # extract byte strings using default locale
-        strcomm = event.comm.decode(decode_locale)
+        event_data.comm = event.comm.decode(decode_locale)
         
         # represent memory address
-        hexaddress = hex(event.address)
-        cgroup_name = ''
-        if cgroup:
-            cgroup_name = cgroup.get_cgroup(event.pid, hexaddress)
-            if not cgroup_name:
-                cgroup_name = 'unknown'
-            elif os.path.isabs(cgroup_name):
-                cgroup_name = cgroup_name[len(Pagemap.CGROUP) + 1:]
+        event_data.addr = hex(event.address)
         
         # device id
-        strdevice = "{}:{}".format(event.major, event.minor)
+        event_data.dev = "{}:{}".format(event.major, event.minor)
 
-        # print
-        print(header_fmt.format(
-            time="{:.4}".format(delta_ms),
-            pid=event.pid,
-            comm=strcomm,
-            dev=strdevice,
-            inum=event.inode,
-            file=filepaths[key],
-            cgroup="{:<12}".format(cgroup_name) if cgroup else ''
-        ))
+        # inode
+        event_data.inum = event.inode
 
-        filepaths.pop(key, None)
+        # filename
+        event_data.filename = filepaths.pop(key)
+
+
+def get_cgroup_name(pagemap, pid, addr):
+    cgroup_name = pagemap.get_cgroup(pid, addr)
+    if not cgroup_name:
+        cgroup_name = '...'
+    elif os.path.isabs(cgroup_name):
+        cgroup_name = cgroup_name[len(Pagemap.CGROUP) + 1:]
+    return cgroup_name
+
+
+def poll(b, event, events, pagemap, cgroup):
+    while 1:
+        b.perf_buffer_poll()
+        # cgroup
+        if cgroup:
+            cgroup_name = get_cgroup_name(pagemap, event.pid, event.addr)
+            sub_entity = cgroup_name
+        else:
+            sub_entity = (event.comm, event.pid)
+        if event.filename not in events:
+            entity = {
+                "counter": 1,
+                "sub_entity": Counter({sub_entity})
+            }
+            events[event.filename] = entity
+        else:
+            entity = events[event.filename]
+            entity["counter"] += 1
+            entity["sub_entity"][sub_entity] += 1
+
+
+def follow_events(b, event, cgroup):
+    # header
+    header_fmt = "{time:<12} {pid:<12} {comm:<20} {cgroup} {dev:<12} {inum:<12} {file}"
+
+    # cgroup support
+    pagemap = Pagemap() if cgroup else None
+
+    print(header_fmt.format(time="TIME(ms)",
+                            pid="PID",
+                            comm="COMM",
+                            dev="DEVICE",
+                            inum="INODE",
+                            file="FILENAME",
+                            cgroup="{:<12}".format("CGROUP") if cgroup else ""))
+
+    # loop with callback to print event
+    try:
+        while 1:
+            b.perf_buffer_poll()
+
+            # cgroup
+            cgroup_name = get_cgroup_name(pagemap, event.pid, event.addr) if cgroup else None
+
+            # print eventMAXACTIVE
+            print(header_fmt.format(time="{:.4}".format(event.ts),
+                                    pid=str(event.pid),
+                                    comm=event.comm,
+                                    dev=event.dev,
+                                    inum=str(event.inum),
+                                    file=event.filename,
+                                    cgroup="{:<12}".format(cgroup_name) if cgroup else ""))
+    except KeyboardInterrupt:
+        print("Detaching...")
+
+
+def format_loadavg():
+    with open(loadavg, "r") as stats:
+        return "%-8s loadavg: %s" % (time.strftime("%H:%M:%S"), stats.read())
+
+
+def top(b, event, cgroup, interval, noclear, verbose):
+    from threading import Thread
+    events = dict()
+
+    # suppress stderr
+    if not verbose:
+        _stderr, sys.stderr = sys.stderr, open(os.devnull, "w")
+
+    # special chars
+    arrow = "─"
+    header_arrow = "┌─"
+    branch_arrow = "├"
+    root_arrow = "└"
+    scale_char = "█"
+    empty_scale_char = "▒"
+
+    # header
+    file_maxlen = 80
+    scale_width = 25
+    header_fmt = "{{file:<{}}} {{amount}}".format(file_maxlen)
+
+    # cgroup support
+    pagemap = Pagemap() if cgroup else None
+
+    t = Thread(target=poll, args=(b, event, events, pagemap, cgroup), daemon=True)
+    try:
+        print('Tracing... Output every {} secs. Hit Ctrl-C to end'.format(interval))
+        t.start()
+        while 1:
+            time.sleep(interval)
+            # update screen
+            call("clear") if not noclear else print("")
+            print(format_loadavg())
+            print(header_fmt.format(file="FILE",
+                                    amount="  AMOUNT"))
+            for name, options in sorted(events.items(), key=lambda x: x[1]["counter"], reverse=True):
+                counter = options["counter"]
+                sub_entity = options["sub_entity"]
+
+                print(header_arrow + header_fmt.format(file=name[:file_maxlen],
+                                        amount=counter))
+                for i, sub_counter in enumerate(sorted(sub_entity.most_common(), key=lambda x: x[1], reverse=True)):
+                    sub_name, sub_count = sub_counter
+                    if isinstance(sub_name, tuple):
+                        sub_name = "{} ({})".format(sub_name[0], sub_name[1])
+                    sub_ratio = int(scale_width * sub_count / counter)
+                    scale_bar = scale_char * sub_ratio + empty_scale_char * (scale_width - sub_ratio)
+                    tree_char = root_arrow if i >= (len(sub_entity) - 1) else branch_arrow
+                    print("{tree_char}{arrow}{name:<80}{prc}".format(tree_char=tree_char, arrow=arrow*2, name=sub_name, prc=scale_bar))
+            events.clear()
+    except KeyboardInterrupt:
+        print("Detaching...")
+    finally:
+        if not verbose:
+            sys.stderr.close()
+            sys.stderr = _stderr
 
 
 def main():
+    def perf_buffer_lost_cb(lost_cb):
+        if args.verbose:
+            print("Possibly lost {} samples".format(lost_cb))
+
     global bpf_text
 
     args = parse_args()
@@ -282,38 +417,24 @@ def main():
         if args.ebpf:
             return 0
 
-    # header
-    header_fmt = "{time:<12} {pid:<12} {comm:<20} {cgroup} {dev:<12} {inum:<12} {file}"
-    print(header_fmt.format(time="TIME(ms)",
-                            pid="PID",
-                            comm="COMM",
-                            dev="DEVICE",
-                            inum="INODE",
-                            file="FILENAME",
-                            cgroup="{:<12}".format("CGROUP") if args.cgroup else ""))
-
     # initialize BPF
     b = BPF(text=bpf_text)
     b.attach_kprobe(event='filemap_fault', fn_name='fault_handle_start')
     b.attach_kretprobe(event='filemap_fault', fn_name='fault_handle_return')
 
     filepaths = dict()
+    event = namedtuple("Event", ["ts", "pid", "addr", "comm", "dev", "inum", "filename", "cgroup"])
 
-    # cgroup support
-    cgroup = Pagemap() if args.cgroup else None
+    b["events"].open_perf_buffer(
+        functools.partial(process_event, filepaths, event), lost_cb=perf_buffer_lost_cb)
 
     # follow mode
     if args.follow:
-        # loop with callback to print event
-        b["events"].open_perf_buffer(
-            functools.partial(print_event, filepaths, cgroup, header_fmt))
-        try:
-            while 1:
-                b.perf_buffer_poll()
-        except KeyboardInterrupt:
-            pass
-        return 0
-    
+        follow_events(b, event, args.cgroup)
+    else:
+        top(b, event, args.cgroup, args.interval, args.noclear, args.verbose)
+    return 0
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -322,13 +443,19 @@ def parse_args():
         epilog=EXAMPLES)
     parser.add_argument("-p", "--pid",
         help="trace specific PID only")
+    parser.add_argument("-i", "--interval", type=int, default=1,
+        help="output interval (seconds)")
+    parser.add_argument("-C", "--noclear", action="store_true", default=False,
+        help="do not clear the screen")
     parser.add_argument("--max-depth", default="5",
         help="descend at minimal level in filesystem hierarchy (defaults to 5)")
-    parser.add_argument("-f", "--follow", action="store_true", default=True,
+    parser.add_argument("-f", "--follow", action="store_true", default=False,
         help="trace new events sequently")
     parser.add_argument("-c", "--cgroup", action="store_true", default=False,
         help="show cgroup name which charged faulted memory page")
     parser.add_argument("--ebpf", action="store_true",
+        help=argparse.SUPPRESS)
+    parser.add_argument("--verbose", action="store_true",
         help=argparse.SUPPRESS)
     return parser.parse_args()
 

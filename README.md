@@ -37,8 +37,3 @@ There is a [bcc](https://raw.githubusercontent.com/iovisor/bcc/) tool. Follow up
 There is a limitation in BPF itself about maximum stack size, so you have to specify maximum depth of file path resolution (MAXDEPTH) or use default value (which is 5 iterations). You should set moderate amount, otherwise, the program won't start due to overflowing.
 File path resolution works only within specific mount namespace. You can use major and minor device ids to determine specific partition related to specific major fault.
 
-
-
-## TODO
-
-1. Add aggregation feature (top-style)
